@@ -8,8 +8,8 @@
 #include <HardwareSerial.h>
 
 // Configuration Data //
-const char *ssid = "***";
-const char *pass = "***";
+const char *ssid = "*****";
+const char *pass = "******";
 const char *host = "192.168.1.107";
 const uint16_t port = 5000;
 
@@ -37,7 +37,6 @@ MPU6050 mpu;
 TinyGPSPlus gps;
 HardwareSerial ss(2);
 
-
 // JSON Data Buffers //
 static JsonDocument oxiJson; // JSON document to store the Oxi data
 static JsonArray irBuffer = oxiJson["IR"].to<JsonArray>();
@@ -52,8 +51,11 @@ JsonObject gyroData = accJson["gyroData"].add<JsonObject>();
 JsonArray gyroDataX = gyroData["gyroDataX"].to<JsonArray>();
 JsonArray gyroDataY = gyroData["gyroDataY"].to<JsonArray>();
 JsonArray gyroDataZ = gyroData["gyroDataZ"].to<JsonArray>();
+JsonDocument gpsJson; // JSON document to store the GPS data
+
 size_t sizeOxi;
 size_t sizeAcc;
+size_t sizeGps;
 
 // MPU control/status vars //
 bool dmpReady = false;  // set true if DMP init was successful
@@ -73,6 +75,7 @@ VectorInt16 ggWorld; // [x, y, z]            world-frame accel sensor measuremen
 // String Data Buffers //
 static char jsonPayloadOxi[5000];
 static char jsonPayloadAcc[10000];
+static char jsonPayloadGps[300];
 
 // Temp Data Buffers //
 static uint16_t oxiIndex = 0;
@@ -99,26 +102,26 @@ static SemaphoreHandle_t mutexOxi;
 static SemaphoreHandle_t mutexGps;
 static bool oxiNotified = false;
 static bool accNotified = false;
+static bool gpsNotified = false;
 
 // Multi-Tasking Functions //
 void taskReadOxi(void *parameters);
 void taskReadAcc(void *parameters);
+void taskReadGps(void *parameters);
 void taskSendVals(void *parameters);
 
 // Helper Function Declarations //
 void sendVals(char *jsonPayload, size_t size, const char *route);
-static void printDateTime(TinyGPSDate &d, TinyGPSTime &t);
 
 // Interrupt Service Routines //
 void ICACHE_RAM_ATTR dmpDataReady()
 {
-    // Serial.println("II");
     vTaskNotifyGiveFromISR(accHandle, 0);
 }
-bool GPSReady = false;
+
 void ICACHE_RAM_ATTR uartDataRdy()
 {
-    GPSReady = true;
+    vTaskNotifyGiveFromISR(gpsHandle, 0);
 }
 
 void setup()
@@ -172,16 +175,15 @@ void setup()
     }
 
     if (!particleSensor.begin(Wire, I2C_SPEED_FAST))
-    { // Use default I2C port, 400kHz speed
+    {
         Serial.println("MAX30105 was not found. Please check wiring/power. ");
-        while (1)
-            ;
+        while (1);
     }
     particleSensor.setup(ledBrightness, sampleAverage, ledMode, sampleRate, pulseWidth, adcRange); // Configure sensor with these settings
 
-    // Serial.println("Initializing GPS");
-    // ss.onReceive(uartDataRdy);
-    // ss.begin(9600);
+    Serial.println("Initializing GPS");
+    ss.onReceive(uartDataRdy, false);
+    ss.begin(9600);
 
     oxiIndex = 0;
     accIndex = 0;
@@ -205,6 +207,13 @@ void setup()
                             2,
                             &accHandle,
                             1);
+    xTaskCreatePinnedToCore(taskReadGps,
+                            "GPS Reader Task",
+                            2048,
+                            NULL,
+                            1,
+                            &gpsHandle,
+                            0);
     xTaskCreatePinnedToCore(taskSendVals,
                             "Oximeter Sender Task",
                             2048,
@@ -212,13 +221,6 @@ void setup()
                             2,
                             &sendValsHandle,
                             0);
-    // xTaskCreatePinnedToCore(taskReadSendGps,
-    //                         "GPS Reader and Sender Task",
-    //                         1024,
-    //                         NULL,
-    //                         1,
-    //                         &gpsHandle,
-    //                         0);
     vTaskDelete(NULL);
 }
 
@@ -228,28 +230,23 @@ void taskReadAcc(void *parameters)
 {
     for (;;)
     {
-        // Serial.println("Waiting for Acc");
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY); // Wait for the task to be notified
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         if (!dmpReady)
-            continue; // if programming failed, don't try to do anything
-        // Serial.println("Reading Acc");
+            continue;
         mpuIntStatus = mpu.getIntStatus();
-        fifoCount = mpu.getFIFOCount(); // get current FIFO count
-        // check for overflow (this should never happen unless our code is too inefficient)
+        fifoCount = mpu.getFIFOCount();
         if ((mpuIntStatus & 0x10) || fifoCount == 1024)
         {
-            mpu.resetFIFO(); // reset so we can continue cleanly
+            mpu.resetFIFO();
             Serial.println("FIFO overflow!");
-            // otherwise, check for DMP data ready interrupt (this should happen frequently)
         }
         else if (mpuIntStatus & 0x02)
         {
-            // wait for correct available data length, should be a VERY short wait
             while (fifoCount < packetSize)
                 fifoCount = mpu.getFIFOCount();
-            mpu.getFIFOBytes(fifoBuffer, packetSize); // read a packet from FIFO
+            mpu.getFIFOBytes(fifoBuffer, packetSize);
 
-            if(accCount % secPerReqAcc == 0)
+            if (accCount % secPerReqAcc == 0)
             {
                 mpu.dmpGetQuaternion(&q, fifoBuffer);
                 mpu.dmpGetAccel(&aa, fifoBuffer);
@@ -272,7 +269,6 @@ void taskReadAcc(void *parameters)
                     gyroDataX.add(String(AGX, 3));
                     gyroDataY.add(String(AGY, 3));
                     gyroDataZ.add(String(AGZ, 3));
-                    // Serial.println("III");
                     xSemaphoreGive(mutexAcc);
                     accIndex++;
                     if (accIndex >= batchSizeAcc)
@@ -328,25 +324,47 @@ void taskReadOxi(void *parameters)
     vTaskDelete(NULL);
 }
 
+void taskReadGps(void *parameters)
+{
+    for (;;)
+    {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        while (ss.available())
+            gps.encode(ss.read());
+        gpsJson["Latitude"].add(String(gps.location.lat(), 7));
+        gpsJson["Longitude"].add(String(gps.location.lng(), 7));
+        char sz[32];
+        sprintf(sz, "%02d/%02d/%02d", gps.date.month(), gps.date.day(), gps.date.year());
+        gpsJson["Date"].add(sz);
+
+        sprintf(sz, "%02d:%02d:%02d", gps.time.hour(), gps.time.minute(), gps.time.second());
+        gpsJson["Time"].add(sz);
+        gpsJson["Altitude"].add(String(gps.altitude.meters(), 7));
+
+        if (xSemaphoreTake(mutexGps, 0) == pdTRUE)
+        {
+            gpsNotified = true;
+            xSemaphoreGive(mutexGps);
+        }
+        xTaskNotifyGive(sendValsHandle); 
+        vTaskDelay(1000 / portTICK_PERIOD_MS);   
+        if (millis() > 5000 && gps.charsProcessed() < 10)
+            Serial.println(F("No GPS data received: check wiring"));
+    }
+}
+
 void taskSendVals(void *parameters)
 {
     for (;;)
     {
-        // Wait for notifications from read tasks indicating data is ready
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        // Check if any of the JSON objects are ready to be sent
         if (accNotified == true && xSemaphoreTake(mutexAcc, 0) == pdTRUE)
         {
-            // Check if the accelerometer JSON object is filled
             if (accelDataX.size() > 0)
             {
-                // Serial.println("Sending Acc");
-                // Serialize the JSON object and send via WiFi
                 sizeAcc = measureJson(accJson);
                 serializeJson(accJson, jsonPayloadAcc);
-                sendVals(jsonPayloadAcc, sizeAcc, "api/hw/acc");
-
-                // Clear the JSON object after sending
+                sendVals(jsonPayloadAcc, sizeAcc, "/api/hw/acc");
                 accelDataX.clear();
                 accelDataY.clear();
                 accelDataZ.clear();
@@ -355,65 +373,38 @@ void taskSendVals(void *parameters)
                 gyroDataZ.clear();
             }
             accNotified = false;
-            xSemaphoreGive(mutexAcc); // Release the semaphore
+            xSemaphoreGive(mutexAcc);
         }
         if (oxiNotified == true && xSemaphoreTake(mutexOxi, 0) == pdTRUE)
         {
-            // Check if the oximeter JSON object is filled
             if (irBuffer.size() > 0)
             {
-                // Serial.println("Sending Oxi");
-                // Serialize the JSON object and send via WiFi
                 sizeOxi = measureJson(oxiJson);
                 serializeJson(oxiJson, jsonPayloadOxi);
-                sendVals(jsonPayloadOxi, sizeOxi, "api/hw/oxi");
-
-                // Clear the JSON object after sending
+                sendVals(jsonPayloadOxi, sizeOxi, "/api/hw/oxi");
                 irBuffer.clear();
                 redBuffer.clear();
                 timeStamp.clear();
             }
             oxiNotified = false;
-            xSemaphoreGive(mutexOxi); // Release the semaphore
+            xSemaphoreGive(mutexOxi);
         }
-
-        // if (xSemaphoreTake(mutexGps, portMAX_DELAY) == pdTRUE) {
-        //     // Check if the GPS JSON object is filled
-        //     if (gpsData.size() > 0) {
-        //         // Serialize the JSON object and send via WiFi
-        //         sizeGps = measureJson(gpsJson);
-        //         serializeJson(gpsJson, jsonPayloadGps);
-        //         sendVals(jsonPayloadGps, sizeGps, "api/hw/gps");
-
-        //         // Clear the JSON object after sending
-        //         gpsData.clear();
-        //     }
-        //     xSemaphoreGive(mutexGps); // Release the semaphore
-        // }
+        if (gpsNotified == true && xSemaphoreTake(mutexGps, 0) == pdTRUE)
+        {
+            if (gpsJson.size() > 0)
+            {
+                sizeGps = measureJson(gpsJson);
+                serializeJson(gpsJson, jsonPayloadGps);
+                sendVals(jsonPayloadGps, sizeGps, "/api/hw/gps");
+                gpsJson.clear();
+            }
+            gpsNotified = false;
+            xSemaphoreGive(mutexGps);
+        }
+        vTaskDelay(200 / portTICK_PERIOD_MS);
     }
-    vTaskDelete(NULL); // Delete the task when finished
+    vTaskDelete(NULL);
 }
-
-// void taskReadSendGps(void *parameters)
-// {
-//     for(;;)
-//     {
-//         if(GPSReady)
-//         {
-//             while (ss.available())
-//                 gps.encode(ss.read());
-//             Serial.println(String(gps.location.lat(), 7) + ", " + String(gps.location.isValid()));
-//             Serial.println(String(gps.location.lng(), 7) + ", " + String(gps.location.isValid()));
-//             printDateTime(gps.date, gps.time);
-//             Serial.println(String(gps.altitude.meters()) + ", " + String(gps.altitude.isValid()));
-//             Serial.println(String(gps.location.lat()) + ", " + String(gps.location.isValid()));
-//             GPSReady = false;
-//             vTaskDelay(1000 / portTICK_PERIOD_MS);
-//         }
-//         if (millis() > 5000 && gps.charsProcessed() < 10)
-//             Serial.println(F("No GPS data received: check wiring"));
-//     }
-// }
 
 void sendVals(char *jsonPayload, size_t size, const char *route = "")
 {
