@@ -8,9 +8,9 @@
 #include <HardwareSerial.h>
 
 // Configuration Data //
-const char *ssid = "*****";
-const char *pass = "******";
-const char *host = "192.168.1.107";
+const char *ssid = "***";
+const char *pass = "****";
+const char *host = "****";
 const uint16_t port = 5000;
 
 const uint16_t batchSizeOxi = 190; // 3 seconds of sample if each second -> 62.5 samples are gathered
@@ -177,7 +177,8 @@ void setup()
     if (!particleSensor.begin(Wire, I2C_SPEED_FAST))
     {
         Serial.println("MAX30105 was not found. Please check wiring/power. ");
-        while (1);
+        while (1)
+            ;
     }
     particleSensor.setup(ledBrightness, sampleAverage, ledMode, sampleRate, pulseWidth, adcRange); // Configure sensor with these settings
 
@@ -331,23 +332,23 @@ void taskReadGps(void *parameters)
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         while (ss.available())
             gps.encode(ss.read());
-        gpsJson["Latitude"].add(String(gps.location.lat(), 7));
-        gpsJson["Longitude"].add(String(gps.location.lng(), 7));
+        gpsJson["Latitude"] = (String(gps.location.lat(), 7));
+        gpsJson["Longitude"] = (String(gps.location.lng(), 7));
         char sz[32];
         sprintf(sz, "%02d/%02d/%02d", gps.date.month(), gps.date.day(), gps.date.year());
-        gpsJson["Date"].add(sz);
+        gpsJson["Date"] = (sz);
 
         sprintf(sz, "%02d:%02d:%02d", gps.time.hour(), gps.time.minute(), gps.time.second());
-        gpsJson["Time"].add(sz);
-        gpsJson["Altitude"].add(String(gps.altitude.meters(), 7));
+        gpsJson["Time"] = (sz);
+        gpsJson["Altitude"] = (String(gps.altitude.meters(), 7));
 
         if (xSemaphoreTake(mutexGps, 0) == pdTRUE)
         {
             gpsNotified = true;
             xSemaphoreGive(mutexGps);
         }
-        xTaskNotifyGive(sendValsHandle); 
-        vTaskDelay(1000 / portTICK_PERIOD_MS);   
+        xTaskNotifyGive(sendValsHandle);
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
         if (millis() > 5000 && gps.charsProcessed() < 10)
             Serial.println(F("No GPS data received: check wiring"));
     }
