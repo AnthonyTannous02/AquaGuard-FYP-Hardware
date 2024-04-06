@@ -6,12 +6,16 @@
 #include "Wire.h"
 #include <TinyGPSPlus.h>
 #include <HardwareSerial.h>
+#include <WiFiManager.h> //https://github.com/tzapu/WiFiManager
+#include <EEPROM.h>
+#include <cstdlib>
 
-// Configuration Data //
-const char *ssid = "***";
-const char *pass = "****";
-const char *host = "****";
-const uint16_t port = 5000;
+
+// Wifi Data //
+char hostname[100];
+char port[6];
+char *portPtr;
+uint16_t portFinal;
 
 const uint16_t batchSizeOxi = 190; // 3 seconds of sample if each second -> 62.5 samples are gathered
 const uint16_t batchSizeAcc = 100; // Maximum number of samples to store
@@ -25,12 +29,14 @@ const int pulseWidth = 118;    // Options: 69, 118, 215, 411
 const int adcRange = 16384;    // Options: 2048, 4096, 8192, 16384
 
 #define INTERRUPT_PIN 15
+#define WIFI_RESET_PIN 34
+#define EEPROM_SIZE 200
 #define EARTH_GRAVITY_MS2 9.80665 // m/s2
 #define DEG_TO_RAD 0.017453292519943295769236907684886
 #define RAD_TO_DEG 57.295779513082320876798154814105
 
 // Useful Objects //
-WiFiMulti wf;
+WiFiManager wm;
 MAX30105 particleSensor;
 WiFiClient client;
 MPU6050 mpu;
@@ -56,6 +62,10 @@ JsonDocument gpsJson; // JSON document to store the GPS data
 size_t sizeOxi;
 size_t sizeAcc;
 size_t sizeGps;
+
+// WiFi Manager Vars //
+bool shouldSaveConfig = false;
+bool shouldResetWifi = false;
 
 // MPU control/status vars //
 bool dmpReady = false;  // set true if DMP init was successful
@@ -112,6 +122,15 @@ void taskSendVals(void *parameters);
 
 // Helper Function Declarations //
 void sendVals(char *jsonPayload, size_t size, const char *route);
+void setupWiFiManager();
+static bool str_to_uint16(const char *str, uint16_t *res);
+
+// Callbacks //
+void saveConfigCallback()
+{
+    Serial.println("Should save config");
+    shouldSaveConfig = true;
+}
 
 // Interrupt Service Routines //
 void ICACHE_RAM_ATTR dmpDataReady()
@@ -124,6 +143,11 @@ void ICACHE_RAM_ATTR uartDataRdy()
     vTaskNotifyGiveFromISR(gpsHandle, 0);
 }
 
+void ICACHE_RAM_ATTR resetWifi()
+{
+    shouldResetWifi = true;
+}
+
 void setup()
 {
     WiFi.mode(WIFI_STA);
@@ -131,12 +155,9 @@ void setup()
     Serial.println("Starting...");
     Wire.begin();
     Wire.setClock(400000);
-    wf.addAP(ssid, pass);
-    while (wf.run() != WL_CONNECTED)
-    {
-        Serial.print(".");
-        vTaskDelay(500 / portTICK_PERIOD_MS);
-    }
+
+    setupWiFiManager();
+    
     Serial.println("");
     Serial.println("WiFi connected");
     Serial.println("IP address: ");
@@ -295,6 +316,16 @@ void taskReadOxi(void *parameters)
 {
     for (;;)
     {
+        // Check For Reset
+        if (shouldResetWifi)
+        {
+            Serial.println("wifi reset");
+            wm.resetSettings();
+            Serial.println("wifi reset1");
+            shouldResetWifi = false;
+            Serial.println("wifi reset2");
+            ESP.restart();
+        }
         particleSensor.check();
         while (particleSensor.available())
         {
@@ -409,13 +440,13 @@ void taskSendVals(void *parameters)
 
 void sendVals(char *jsonPayload, size_t size, const char *route = "")
 {
-    if (!client.connect(host, port))
+    if (!client.connect(hostname, portFinal))
     {
         Serial.println("Connection failed");
         return;
     }
     client.println("POST /" + String(route) + " HTTP/1.1");
-    client.println("Host: " + String(host));
+    client.println("Host: " + String(hostname));
     client.println("Content-Type: application/json");
     client.println("Connection: close");
     client.print("Content-Length: ");
@@ -423,4 +454,43 @@ void sendVals(char *jsonPayload, size_t size, const char *route = "")
     client.println();
     client.println(jsonPayload);
     client.stop();
+}
+
+void setupWiFiManager()
+{
+    attachInterrupt(digitalPinToInterrupt(WIFI_RESET_PIN), resetWifi, FALLING);
+    EEPROM.begin(512);
+
+    bool res;
+    wm.setSaveConfigCallback(saveConfigCallback);
+    wm.setConnectTimeout(20);
+    WiFiManagerParameter customHostname("HostName", "Server Hostname", hostname, 100);
+    WiFiManagerParameter customPort("Port", "Connection Port", port, 6);
+    wm.addParameter(&customHostname);
+    wm.addParameter(&customPort);
+    res = wm.autoConnect("AutoConnectAP", "FYPpassword"); 
+
+    if (!res)
+    {
+        Serial.println("Failed to connect");
+    }
+    else
+    {
+        Serial.println("connected...yeey :)");
+        strcpy(hostname, customHostname.getValue());
+        strcpy(port, customPort.getValue());
+        if (shouldSaveConfig)
+        {
+            EEPROM.writeString(0, hostname);
+            EEPROM.writeString(sizeof(hostname) + 1, port);
+            EEPROM.commit();
+            delay(100);
+            Serial.println(EEPROM.readString(0) + ", " + EEPROM.readString(sizeof(hostname) + 1));
+        }
+        strcpy(hostname, EEPROM.readString(0).c_str());
+        strcpy(port, EEPROM.readString(sizeof(hostname)+1).c_str());
+    }
+    long value = strtol(port, &portPtr, 10); // Convert character array to long integer
+    portFinal = static_cast<uint16_t>(value); // Convert to int if necessary
+
 }
