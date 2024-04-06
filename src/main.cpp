@@ -44,23 +44,23 @@ TinyGPSPlus gps;
 HardwareSerial ss(2);
 
 // JSON Data Buffers //
-static JsonDocument oxiJson; // JSON document to store the Oxi data
+static JsonDocument sensorJson;
+static JsonObject oxiJson = sensorJson["OXI"].to<JsonObject>(); // JSON document to store the Oxi data
 static JsonArray irBuffer = oxiJson["IR"].to<JsonArray>();
 static JsonArray redBuffer = oxiJson["RED"].to<JsonArray>();
 static JsonArray timeStamp = oxiJson["TIME"].to<JsonArray>();
-JsonDocument accJson; // JSON document to store the Acc data
-JsonObject accelData = accJson["accelData"].add<JsonObject>();
+JsonObject accJson = sensorJson["ACC"].to<JsonObject>(); // JSON document to store the Acc data
+JsonObject accelData = accJson["accelData"].to<JsonObject>();
 JsonArray accelDataX = accelData["accelDataX"].to<JsonArray>();
 JsonArray accelDataY = accelData["accelDataY"].to<JsonArray>();
 JsonArray accelDataZ = accelData["accelDataZ"].to<JsonArray>();
-JsonObject gyroData = accJson["gyroData"].add<JsonObject>();
+JsonObject gyroData = accJson["gyroData"].to<JsonObject>();
 JsonArray gyroDataX = gyroData["gyroDataX"].to<JsonArray>();
 JsonArray gyroDataY = gyroData["gyroDataY"].to<JsonArray>();
 JsonArray gyroDataZ = gyroData["gyroDataZ"].to<JsonArray>();
 JsonDocument gpsJson; // JSON document to store the GPS data
 
-size_t sizeOxi;
-size_t sizeAcc;
+size_t sizeSen;
 size_t sizeGps;
 
 // WiFi Manager Vars //
@@ -83,8 +83,7 @@ VectorInt16 aaWorld; // [x, y, z]            world-frame accel sensor measuremen
 VectorInt16 ggWorld; // [x, y, z]            world-frame accel sensor measurements
 
 // String Data Buffers //
-static char jsonPayloadOxi[5000];
-static char jsonPayloadAcc[10000];
+static char jsonPayloadSen[20000];
 static char jsonPayloadGps[300];
 
 // Temp Data Buffers //
@@ -292,17 +291,17 @@ void taskReadAcc(void *parameters)
                     gyroDataY.add(String(AGY, 3));
                     gyroDataZ.add(String(AGZ, 3));
                     xSemaphoreGive(mutexAcc);
-                    accIndex++;
-                    if (accIndex >= batchSizeAcc)
-                    {
-                        if (xSemaphoreTake(mutexAcc, 0) == pdTRUE)
-                        {
-                            accNotified = true;
-                            xSemaphoreGive(mutexAcc);
-                        }
-                        xTaskNotifyGive(sendValsHandle);
-                        accIndex = 0;
-                    }
+                    // accIndex++;
+                    // if (accIndex >= batchSizeAcc)
+                    // {
+                    //     if (xSemaphoreTake(mutexAcc, 0) == pdTRUE)
+                    //     {
+                    //         accNotified = true;
+                    //         xSemaphoreGive(mutexAcc);
+                    //     }
+                    //     xTaskNotifyGive(sendValsHandle);
+                    //     accIndex = 0;
+                    // }
                 }
             }
             accCount++;
@@ -390,37 +389,42 @@ void taskSendVals(void *parameters)
     for (;;)
     {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        if (accNotified == true && xSemaphoreTake(mutexAcc, 0) == pdTRUE)
+        if ((oxiNotified == true) && 
+        xSemaphoreTake(mutexAcc, 0) == pdTRUE)
         {
-            if (accelDataX.size() > 0)
+            if (accelDataX.size() > 0 || irBuffer.size() > 0)
             {
-                sizeAcc = measureJson(accJson);
-                serializeJson(accJson, jsonPayloadAcc);
-                sendVals(jsonPayloadAcc, sizeAcc, "/api/hw/acc");
+                sizeSen = measureJson(sensorJson);
+                serializeJson(sensorJson, jsonPayloadSen);
+                sendVals(jsonPayloadSen, sizeSen, "/api/hw/sens");
                 accelDataX.clear();
                 accelDataY.clear();
                 accelDataZ.clear();
                 gyroDataX.clear();
                 gyroDataY.clear();
                 gyroDataZ.clear();
-            }
-            accNotified = false;
-            xSemaphoreGive(mutexAcc);
-        }
-        if (oxiNotified == true && xSemaphoreTake(mutexOxi, 0) == pdTRUE)
-        {
-            if (irBuffer.size() > 0)
-            {
-                sizeOxi = measureJson(oxiJson);
-                serializeJson(oxiJson, jsonPayloadOxi);
-                sendVals(jsonPayloadOxi, sizeOxi, "/api/hw/oxi");
                 irBuffer.clear();
                 redBuffer.clear();
                 timeStamp.clear();
             }
+            
             oxiNotified = false;
-            xSemaphoreGive(mutexOxi);
+            xSemaphoreGive(mutexAcc);
         }
+        // if (oxiNotified == true && xSemaphoreTake(mutexOxi, 0) == pdTRUE)
+        // {
+        //     if (irBuffer.size() > 0)
+        //     {
+        //         sizeOxi = measureJson(oxiJson);
+        //         serializeJson(oxiJson, jsonPayloadOxi);
+        //         sendVals(jsonPayloadOxi, sizeOxi, "/api/hw/oxi");
+        //         irBuffer.clear();
+        //         redBuffer.clear();
+        //         timeStamp.clear();
+        //     }
+        //     oxiNotified = false;
+        //     xSemaphoreGive(mutexOxi);
+        // }
         if (gpsNotified == true && xSemaphoreTake(mutexGps, 0) == pdTRUE)
         {
             if (gpsJson.size() > 0)
